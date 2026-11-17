@@ -62,6 +62,14 @@ Item {
   property var previousProcessTimes: ({})
   property real previousProcessAt: 0
   property var processNames: ({})
+  property var groupRules: Model.compileGroupRules(null)
+  property int appRows: 6
+  // pid -> PSS bytes from the last full ("pss") scan; cheap scans in between
+  // reuse it so group totals do not flip between PSS and RSS.
+  property var pssCache: ({})
+  property int processScanCount: 0
+  property string processScanMode: "pss"
+  readonly property string processScanScript: decodeURIComponent(String(Qt.resolvedUrl("scan-processes.sh")).replace(/^file:\/\//, ""))
 
   // Network -----------------------------------------------------------
   property bool networkEnabled: true
@@ -151,6 +159,8 @@ Item {
       root.previousProcessTimes = ({})
       root.previousProcessAt = 0
       root.processNames = ({})
+      root.pssCache = ({})
+      root.processScanCount = 0
       root.topAppsCpu = []
       root.topAppsRam = []
       root.topGpu = []
@@ -165,17 +175,22 @@ Item {
 
   function refreshProcesses() {
     if (!root.panelOpen) return
-    if (!processList.running) processList.running = true
+    if (processList.running) return
+    root.processScanMode = (root.processScanCount % 5 === 0) ? "pss" : "rss"
+    root.processScanCount++
+    processList.running = true
   }
 
   function applyProcessSnapshot(text) {
     if (!root.panelOpen) return
-    var rows = Model.parseProcessSnapshot(text)
+    var rows = Model.parseProcessScan(text)
     var now = Date.now()
     var elapsed = root.previousProcessAt > 0 ? (now - root.previousProcessAt) / 1000 : 0
     var previous = root.previousProcessTimes || ({})
     var next = ({})
     var names = ({})
+    var fullScan = root.processScanMode === "pss"
+    var cache = fullScan ? ({}) : root.pssCache
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i]
       next[row.pid] = row.cpuSeconds
@@ -184,10 +199,14 @@ Item {
       row.cpu = (before !== undefined && elapsed > 0)
         ? Math.max(0, (row.cpuSeconds - before) / elapsed * 100)
         : 0
+      if (fullScan && row.pss >= 0) cache[row.pid] = row.pss
+      row.memory = cache[row.pid] !== undefined ? cache[row.pid] : row.rss
+      row.approx = cache[row.pid] === undefined
     }
+    if (fullScan) root.pssCache = cache
     root.processNames = names
 
-    var apps = Model.aggregateApps(rows)
+    var apps = Model.aggregateApps(rows, root.groupRules)
     // Aggregated app CPU is the sum of its processes' per-core percentages.
     // Divide by the logical CPU count so the app column is a share of the
     // whole machine, matching the overall CPU number above it.
@@ -198,27 +217,8 @@ Item {
     })
     var ramSorted = apps.slice().sort(function(a, b) { return b.memory - a.memory })
 
-    // Always fill three rows. Active CPU applications come first; when the
-    // desktop is idle the remainder is filled by resident-memory order so the
-    // section still names real applications instead of going blank.
-    var picked = []
-    var seen = ({})
-    for (var c = 0; c < cpuSorted.length && picked.length < 3; c++) {
-      var hot = cpuSorted[c]
-      if (hot.cpu < 0.1) continue
-      picked.push(hot)
-      seen[String(hot.name).toLowerCase()] = true
-    }
-    for (var m = 0; m < ramSorted.length && picked.length < 3; m++) {
-      var app = ramSorted[m]
-      var key = String(app.name).toLowerCase()
-      if (seen[key]) continue
-      picked.push(app)
-      seen[key] = true
-    }
-
-    root.topAppsCpu = picked
-    root.topAppsRam = ramSorted.slice(0, 3)
+    root.topAppsCpu = Model.limitGroups(cpuSorted, root.appRows)
+    root.topAppsRam = Model.limitGroups(ramSorted, root.appRows)
     root.previousProcessTimes = next
     root.previousProcessAt = now
   }
@@ -230,7 +230,7 @@ Item {
       var resolved = root.processNames[raw[i].pid]
       if (resolved) raw[i].name = resolved
     }
-    var apps = Model.aggregateApps(raw)
+    var apps = Model.aggregateApps(raw, root.groupRules)
     apps.sort(function(a, b) { return b.gpu - a.gpu })
     root.topGpu = apps.slice(0, 3)
   }
@@ -468,7 +468,7 @@ Item {
 
   Process {
     id: processList
-    command: ["ps", "-eo", "pid=,time=,rss=,comm="]
+    command: ["bash", root.processScanScript, root.processScanMode]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyProcessSnapshot(text)

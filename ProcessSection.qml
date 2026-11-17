@@ -18,7 +18,7 @@ Item {
   implicitHeight: sectionColumn.implicitHeight
 
   function rowValue(row) {
-    if (root.mode === "mem") return Model.formatBytes(row.memory)
+    if (root.mode === "mem") return (row.approx ? "~" : "") + Model.formatBytes(row.memory)
     if (root.mode === "gpu") {
       var gpu = Number(row.gpu) || 0
       return gpu < 1 ? "< 1%" : Model.formatPercent(gpu)
@@ -51,7 +51,7 @@ Item {
       ProcessRow {
         required property var modelData
         width: sectionColumn.width
-        name: modelData.name
+        name: root.mode === "gpu" || !(modelData.count > 1) ? modelData.name : modelData.name + " ×" + modelData.count
         value: root.rowValue(modelData)
         foreground: root.foreground
         fontFamily: root.fontFamily

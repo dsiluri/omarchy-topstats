@@ -196,39 +196,88 @@ function parseNvidiaProcesses(text) {
   return out
 }
 
-// ps reports cumulative CPU time as [[dd-]hh:]mm:ss. Converting it to seconds
-// lets the sampler turn two snapshots into an instantaneous percentage, which
-// is far more honest than ps's lifetime average %CPU column.
-function parseCpuTime(value) {
-  var text = String(value || "").trim()
-  if (!text) return 0
-  var days = 0
-  var dash = text.indexOf("-")
-  if (dash !== -1) {
-    days = Number(text.slice(0, dash)) || 0
-    text = text.slice(dash + 1)
-  }
-  var parts = text.split(":")
-  var seconds = 0
-  for (var i = 0; i < parts.length; i++) seconds = seconds * 60 + (Number(parts[i]) || 0)
-  return days * 86400 + seconds
+// Default grouping when the widget entry has no "groups" array. Docker
+// container processes carry arbitrary names (postgres, node), so they can only
+// be grouped by cgroup; the daemons live in docker.service / containerd.service.
+var DEFAULT_GROUP_RULES = [
+  { name: "docker", cgroup: "^/system\\.slice/(docker|containerd)" }
+]
+
+function compilePattern(text) {
+  if (typeof text !== "string" || text === "") return null
+  try { return new RegExp(text) } catch (e) { return null }
 }
 
-// One row: pid cumulative-cpu-time rss comm. The comm field is last because it
-// can contain spaces.
-function parseProcessSnapshot(text) {
+// Ordered rules; the first match wins. A rule matches when its cgroup regex
+// matches the process cgroup path OR its comm regex matches the process name.
+// Entries without a name (or longer than 32 chars) or without a valid pattern
+// are skipped.
+function compileGroupRules(value) {
+  var source = Array.isArray(value) ? value : DEFAULT_GROUP_RULES
+  var out = []
+  for (var i = 0; i < source.length; i++) {
+    var entry = source[i]
+    if (!entry || typeof entry !== "object") continue
+    var name = String(entry.name || "").trim()
+    if (!name || name.length > 32) continue
+    var comm = compilePattern(entry.comm)
+    var cgroup = compilePattern(entry.cgroup)
+    if (!comm && !cgroup) continue
+    out.push({ name: name, comm: comm, cgroup: cgroup })
+  }
+  return out
+}
+
+// scan-processes.sh output: pid, cpu seconds, rss bytes, pss bytes (-1 when
+// not read), cgroup path, comm (last, may contain spaces).
+function parseProcessScan(text) {
   var out = []
   var lines = String(text || "").split("\n")
   for (var i = 0; i < lines.length; i++) {
-    var match = lines[i].match(/^\s*(\d+)\s+(\S+)\s+(\d+)\s+(.+)$/)
-    if (!match) continue
+    var parts = lines[i].split("\t")
+    if (parts.length < 6) continue
+    var pid = Number(parts[0])
+    if (!isFinite(pid) || pid <= 0) continue
+    var comm = parts.slice(5).join(" ")
     out.push({
-      pid: Number(match[1]),
-      cpuSeconds: parseCpuTime(match[2]),
-      memory: Number(match[3]) * 1024,
-      name: processName(match[4])
+      pid: pid,
+      cpuSeconds: Number(parts[1]) || 0,
+      rss: Number(parts[2]) || 0,
+      pss: Number(parts[3]),
+      cgroup: parts[4],
+      comm: comm,
+      name: processName(comm)
     })
   }
+  return out
+}
+
+function groupNameFor(row, rules) {
+  var comm = String(row.comm !== undefined ? row.comm : (row.name || ""))
+  var cgroup = String(row.cgroup || "")
+  for (var i = 0; i < rules.length; i++) {
+    var rule = rules[i]
+    if ((rule.cgroup && cgroup && rule.cgroup.test(cgroup)) || (rule.comm && rule.comm.test(comm))) return rule.name
+  }
+  return row.name
+}
+
+// Keeps the first limit-1 rows and folds the rest into one "other" row, so the
+// section never exceeds `limit` rows. `sorted` must already be in display order.
+function limitGroups(sorted, limit) {
+  var n = Math.max(1, Math.floor(Number(limit) || 6))
+  if (sorted.length <= n) return sorted.slice()
+  var out = sorted.slice(0, n - 1)
+  var other = { name: "other", other: true, cpu: 0, memory: 0, gpu: 0, count: 0, approx: false, pids: [] }
+  for (var i = n - 1; i < sorted.length; i++) {
+    var item = sorted[i]
+    other.cpu += Number(item.cpu) || 0
+    other.memory += Number(item.memory) || 0
+    other.gpu += Number(item.gpu) || 0
+    other.count += Number(item.count) || 0
+    other.approx = other.approx || item.approx === true
+  }
+  out.push(other)
   return out
 }
 
@@ -245,26 +294,32 @@ function processName(value) {
   return name.length > 26 ? name.slice(0, 25) + "…" : name
 }
 
-// Collapse processes that share a command name into one application row.
-// Kernel threads are dropped (they have no resident memory) so an idle list
-// is filled with real applications rather than "7:1-events" and friends.
-function aggregateApps(rows) {
+// Collapse processes into app groups: the first matching rule names the group,
+// unmatched processes group by their own command name. Kernel threads are
+// dropped (they have no resident memory) so an idle list is filled with real
+// applications rather than "7:1-events" and friends.
+function aggregateApps(rows, rules) {
   var byName = {}
+  var activeRules = rules || []
   for (var i = 0; i < rows.length; i++) {
     var row = rows[i]
     var memory = Number(row.memory) || 0
     if (!row.name) continue
-    // ps rows carry RSS; pmon rows do not. Only treat RSS==0 as a kernel
-    // thread when the row actually came from ps.
+    // Scan rows carry memory; pmon rows do not. Only treat memory==0 as a
+    // kernel thread when the row actually came from the scan.
     if (row.memory !== undefined && memory <= 0) continue
-    var key = String(row.name).toLowerCase()
+    var group = groupNameFor(row, activeRules)
+    var key = String(group).toLowerCase()
     if (!byName[key]) {
-      byName[key] = { name: row.name, cpu: 0, memory: 0, gpu: 0, pids: [] }
+      byName[key] = { name: group, cpu: 0, memory: 0, gpu: 0, count: 0, approx: false, pids: [] }
     }
-    byName[key].cpu += Number(row.cpu) || 0
-    byName[key].memory += memory
-    byName[key].gpu += Number(row.gpu) || 0
-    byName[key].pids.push(row.pid)
+    var entry = byName[key]
+    entry.cpu += Number(row.cpu) || 0
+    entry.memory += memory
+    entry.gpu += Number(row.gpu) || 0
+    entry.count += 1
+    entry.approx = entry.approx || row.approx === true
+    entry.pids.push(row.pid)
   }
   var out = []
   for (var name in byName) out.push(byName[name])

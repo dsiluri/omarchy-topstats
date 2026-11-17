@@ -108,6 +108,29 @@ per-metric keys are absent.
 Settings changed in the panel are written back to `shell.json` through
 Omarchy's normal bar-entry update path.
 
+### Application groups (this fork)
+
+The CPU and RAM tabs list application groups instead of single processes. A
+group row shows its process count (`helium ×20`); rows beyond `appRows` fold
+into `other`. Edit both keys in the widget entry of `shell.json`:
+
+```json
+{
+  "id": "io.github.kaplanhalil.topstats",
+  "appRows": 6,
+  "groups": [
+    { "name": "docker", "cgroup": "^/system\\.slice/(docker|containerd)" },
+    { "name": "omp", "comm": "^omp( |$)" },
+    { "name": "helium", "comm": "^helium" }
+  ]
+}
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `appRows` | `6` | Rows per tab, 3 to 20 |
+| `groups` | one `docker` rule | Ordered rules, first match wins. Each has a `name` (max 32 chars) and a `comm` and/or `cgroup` regular expression, tested against the process name and its cgroup path. Unmatched processes group by their own name. |
+
 > **GPU power note:** every `nvidia-smi` call briefly wakes the discrete GPU.
 > The default 2-second interval is responsive; raise `gpuInterval` to 5–10
 > seconds if idle power matters more than chart resolution.
@@ -120,7 +143,7 @@ Omarchy's normal bar-entry update path.
 | RAM / swap | `/proc/meminfo` (`used = total - available`) |
 | NVIDIA | `nvidia-smi --query-gpu`, `nvidia-smi pmon` for processes |
 | AMD | `/sys/class/drm/card*/device/` sysfs |
-| Processes | `/proc/<pid>` via `ps` (CPU is an instantaneous delta, not a lifetime average) |
+| Processes | `scan-processes.sh` reads `/proc/<pid>` (CPU is an instantaneous delta with 10 ms resolution; memory is PSS, falling back to RSS for processes whose `smaps_rollup` is unreadable, marked with `~`) |
 | Network | `/proc/net/dev` deltas sampled every 2 s, loopback excluded, summed across active interfaces |
 | Uptime | `/proc/uptime` |
 

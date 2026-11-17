@@ -103,6 +103,8 @@ BarWidget {
     interval: Math.max(500, Number(root.setting("interval", 1000)) || 1000)
     gpuInterval: Math.max(1000, Number(root.setting("gpuInterval", 2000)) || 2000)
     gpuMode: String(root.setting("gpuDevice", "auto"))
+    groupRules: Model.compileGroupRules(root.setting("groups", null))
+    appRows: Math.max(3, Math.min(20, Math.round(Number(root.setting("appRows", 6)) || 6)))
     networkEnabled: root.showNetwork
   }
 
