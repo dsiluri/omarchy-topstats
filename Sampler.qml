@@ -75,6 +75,11 @@ Item {
   property bool ramPanelVisible: false
   property bool pssReady: false
 
+  // AMD GPU sysfs paths, found once by gpuProbe and then read in-process.
+  property string amdDevice: ""
+  property string amdTempPath: ""
+  property string amdPowerPath: ""
+
   // Network -----------------------------------------------------------
   property bool networkEnabled: true
   property bool netAvailable: false
@@ -264,15 +269,12 @@ Item {
     root.gpuMemTotal = 0
     root.gpuTemp = -1
     root.gpuPower = -1
+    root.amdDevice = ""
+    root.amdTempPath = ""
+    root.amdPowerPath = ""
     if (root.gpuMode === "off") return
     if (root.gpuMode === "nvidia") {
       root.gpuVendor = "nvidia"
-      root.gpuAvailable = true
-      Qt.callLater(root.pollGpu)
-      return
-    }
-    if (root.gpuMode === "amd") {
-      root.gpuVendor = "amd"
       root.gpuAvailable = true
       Qt.callLater(root.pollGpu)
       return
@@ -281,10 +283,27 @@ Item {
   }
 
   function applyGpuProbe(text) {
-    if (root.gpuMode !== "auto") return
-    var vendor = String(text || "").trim().split("\n")[0]
-    if (vendor !== "nvidia" && vendor !== "amd") return
-    root.gpuVendor = vendor
+    if (root.gpuMode !== "auto" && root.gpuMode !== "amd") return
+    var lines = String(text || "").trim().split("\n")
+    var vendor = lines[0].trim()
+    if (vendor === "nvidia" && root.gpuMode === "auto") {
+      root.gpuVendor = vendor
+      root.gpuAvailable = true
+      Qt.callLater(root.pollGpu)
+      return
+    }
+    if (vendor !== "amd") return
+    var dev = (lines[1] || "").trim()
+    if (dev.indexOf("/sys/") !== 0) return
+    var temp = (lines[2] || "").trim()
+    var power = (lines[3] || "").trim()
+    root.amdDevice = dev
+    root.amdTempPath = temp.indexOf("/sys/") === 0 ? temp : ""
+    root.amdPowerPath = power.indexOf("/sys/") === 0 ? power : ""
+    root.gpuName = "AMD Radeon"
+    root.gpuDriver = "amdgpu"
+    amdVramTotalFile.reload()
+    root.gpuVendor = "amd"
     root.gpuAvailable = true
     Qt.callLater(root.pollGpu)
   }
@@ -292,7 +311,12 @@ Item {
   function pollGpu() {
     if (!root.gpuAvailable) return
     if (root.gpuVendor === "nvidia" && !gpuNvidia.running) gpuNvidia.running = true
-    else if (root.gpuVendor === "amd" && !gpuAmd.running) gpuAmd.running = true
+    else if (root.gpuVendor === "amd") {
+      amdBusyFile.reload()
+      amdVramUsedFile.reload()
+      if (root.amdTempPath !== "") amdTempFile.reload()
+      if (root.amdPowerPath !== "") amdPowerFile.reload()
+    }
   }
 
   function applyNvidia(text) {
@@ -309,18 +333,11 @@ Item {
     root.gpuHistory = Model.pushHistory(root.gpuHistory, next.percent, root.gpuHistoryLimit)
   }
 
-  function applyAmd(text) {
+  function applyAmdBusy(text) {
     if (!root.gpuAvailable || root.gpuVendor !== "amd") return
-    var next = Model.parseAmd(text)
-    if (!next) return
-    root.gpuName = next.name
-    root.gpuPercent = next.percent
-    root.gpuMemUsed = next.memUsed
-    root.gpuMemTotal = next.memTotal
-    root.gpuTemp = next.temp
-    root.gpuPower = next.power
-    root.gpuDriver = next.driver
-    root.gpuHistory = Model.pushHistory(root.gpuHistory, next.percent, root.gpuHistoryLimit)
+    var busy = Model.percent(Model.toNumber(text))
+    root.gpuPercent = busy
+    root.gpuHistory = Model.pushHistory(root.gpuHistory, busy, root.gpuHistoryLimit)
   }
 
   onGpuModeChanged: probeGpu()
@@ -441,8 +458,12 @@ Item {
     id: gpuProbe
     command: [
       "bash", "-c",
-      "if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then echo nvidia; exit 0; fi; " +
-      "for d in /sys/class/drm/card*/device; do [ -f \"$d/gpu_busy_percent\" ] && { echo amd; exit 0; }; done; echo none"
+      "mode=\"$1\"; " +
+      "if [ \"$mode\" != amd ] && command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then echo nvidia; exit 0; fi; " +
+      "for d in /sys/class/drm/card*/device; do [ -f \"$d/gpu_busy_percent\" ] || continue; t=\"\"; p=\"\"; " +
+      "for h in \"$d\"/hwmon/hwmon*; do [ -z \"$t\" ] && [ -f \"$h/temp1_input\" ] && t=\"$h/temp1_input\"; [ -z \"$p\" ] && [ -f \"$h/power1_average\" ] && p=\"$h/power1_average\"; done; " +
+      "printf 'amd\\n%s\\n%s\\n%s\\n' \"$d\" \"$t\" \"$p\"; exit 0; done; echo none",
+      "topstats-gpu-probe", root.gpuMode
     ]
     stdout: StdioCollector {
       waitForEnd: true
@@ -464,25 +485,50 @@ Item {
     stderr: StdioCollector { waitForEnd: true }
   }
 
-  Process {
-    id: gpuAmd
-    command: [
-      "bash", "-c",
-      "d=\"\"; for x in /sys/class/drm/card*/device; do [ -f \"$x/gpu_busy_percent\" ] && { d=\"$x\"; break; }; done; " +
-      "[ -n \"$d\" ] || exit 1; " +
-      "busy=$(cat \"$d/gpu_busy_percent\" 2>/dev/null || echo 0); " +
-      "used=$(cat \"$d/mem_info_vram_used\" 2>/dev/null || echo 0); " +
-      "total=$(cat \"$d/mem_info_vram_total\" 2>/dev/null || echo 0); " +
-      "temp=-1; power=-1; " +
-      "for h in \"$d\"/hwmon/hwmon*; do [ -f \"$h/temp1_input\" ] && { temp=$(( $(cat \"$h/temp1_input\") / 1000 )); break; }; done; " +
-      "for h in \"$d\"/hwmon/hwmon*; do [ -f \"$h/power1_average\" ] && { power=$(( $(cat \"$h/power1_average\") / 1000000 )); break; }; done; " +
-      "echo \"AMD Radeon,$busy,$used,$total,$temp,$power\""
-    ]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root.applyAmd(text)
+  FileView {
+    id: amdBusyFile
+    path: root.amdDevice ? root.amdDevice + "/gpu_busy_percent" : ""
+    watchChanges: false
+    printErrors: false
+    onLoaded: root.applyAmdBusy(text())
+  }
+
+  FileView {
+    id: amdVramUsedFile
+    path: root.amdDevice ? root.amdDevice + "/mem_info_vram_used" : ""
+    watchChanges: false
+    printErrors: false
+    onLoaded: root.gpuMemUsed = Model.toNumber(text())
+  }
+
+  FileView {
+    id: amdVramTotalFile
+    path: root.amdDevice ? root.amdDevice + "/mem_info_vram_total" : ""
+    watchChanges: false
+    printErrors: false
+    onLoaded: root.gpuMemTotal = Model.toNumber(text())
+  }
+
+  FileView {
+    id: amdTempFile
+    path: root.amdTempPath
+    watchChanges: false
+    printErrors: false
+    onLoaded: {
+      var t = Model.toNumber(text(), -1)
+      root.gpuTemp = t >= 0 ? Math.floor(t / 1000) : -1
     }
-    stderr: StdioCollector { waitForEnd: true }
+  }
+
+  FileView {
+    id: amdPowerFile
+    path: root.amdPowerPath
+    watchChanges: false
+    printErrors: false
+    onLoaded: {
+      var p = Model.toNumber(text(), -1)
+      root.gpuPower = p >= 0 ? Math.floor(p / 1000000) : -1
+    }
   }
 
   Process {

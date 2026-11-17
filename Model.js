@@ -151,26 +151,6 @@ function toNumber(value, fallback) {
   return n
 }
 
-// AMD exposes the same headline numbers through sysfs. The poll script emits
-// one CSV line so the QML side has a single parser for both vendors.
-// name, busy%, vram used bytes, vram total bytes, temp C, power W
-function parseAmd(text) {
-  var line = String(text || "").trim().split("\n")[0]
-  if (!line) return null
-  var parts = line.split(",")
-  if (parts.length < 4) return null
-  for (var i = 0; i < parts.length; i++) parts[i] = parts[i].trim()
-  return {
-    name: parts[0] || "AMD GPU",
-    percent: percent(toNumber(parts[1])),
-    memUsed: toNumber(parts[2]),
-    memTotal: toNumber(parts[3]),
-    temp: parts.length > 4 ? toNumber(parts[4], -1) : -1,
-    power: parts.length > 5 ? toNumber(parts[5], -1) : -1,
-    driver: "amdgpu"
-  }
-}
-
 // nvidia-smi pmon -c 1 lists every process with a graphics or compute
 // context, unlike --query-compute-apps which omits graphics clients such as
 // the compositor and browser. Columns: gpu pid type sm mem enc dec jpg ofa
