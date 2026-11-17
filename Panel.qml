@@ -76,6 +76,7 @@ Panel {
   function syncGpuPanel() {
     if (!sampler) return
     sampler.setGpuPanelVisible(opened && !settingsMode && tab === "gpu")
+    sampler.setRamPanelVisible(opened && !settingsMode && tab === "ram")
   }
 
   onTabChanged: syncGpuPanel()

@@ -68,8 +68,12 @@ Item {
   // reuse it so group totals do not flip between PSS and RSS.
   property var pssCache: ({})
   property int processScanCount: 0
-  property string processScanMode: "pss"
+  property string processScanMode: "rss"
   readonly property string processScanScript: decodeURIComponent(String(Qt.resolvedUrl("scan-processes.sh")).replace(/^file:\/\//, ""))
+  // PSS (smaps_rollup) is about 4x dearer than the RSS scan and only the RAM
+  // tab shows memory, so it is read only while that tab is visible.
+  property bool ramPanelVisible: false
+  property bool pssReady: false
 
   // Network -----------------------------------------------------------
   property bool networkEnabled: true
@@ -159,6 +163,8 @@ Item {
       root.previousProcessTimes = ({})
       root.previousProcessAt = 0
       root.processNames = ({})
+      root.ramPanelVisible = false
+      root.pssReady = false
       root.pssCache = ({})
       root.processScanCount = 0
       root.topAppsCpu = []
@@ -173,10 +179,20 @@ Item {
     if (value && root.panelOpen && root.gpuVendor === "nvidia" && !gpuApps.running) gpuApps.running = true
   }
 
+  function setRamPanelVisible(value) {
+    if (root.ramPanelVisible === value) return
+    root.ramPanelVisible = value
+    root.pssCache = ({})
+    root.pssReady = false
+    root.processScanCount = 0
+    root.topAppsRam = []
+    if (value) root.refreshProcesses()
+  }
+
   function refreshProcesses() {
     if (!root.panelOpen) return
     if (processList.running) return
-    root.processScanMode = (root.processScanCount % 5 === 0) ? "pss" : "rss"
+    root.processScanMode = (root.ramPanelVisible && root.processScanCount % 5 === 0) ? "pss" : "rss"
     root.processScanCount++
     processList.running = true
   }
@@ -203,7 +219,10 @@ Item {
       row.memory = cache[row.pid] !== undefined ? cache[row.pid] : row.rss
       row.approx = cache[row.pid] === undefined
     }
-    if (fullScan) root.pssCache = cache
+    if (fullScan) {
+      root.pssCache = cache
+      root.pssReady = true
+    }
     root.processNames = names
 
     var apps = Model.aggregateApps(rows, root.groupRules)
@@ -218,7 +237,7 @@ Item {
     var ramSorted = apps.slice().sort(function(a, b) { return b.memory - a.memory })
 
     root.topAppsCpu = Model.limitGroups(cpuSorted, root.appRows)
-    root.topAppsRam = Model.limitGroups(ramSorted, root.appRows)
+    if (root.ramPanelVisible && root.pssReady) root.topAppsRam = Model.limitGroups(ramSorted, root.appRows)
     root.previousProcessTimes = next
     root.previousProcessAt = now
   }
