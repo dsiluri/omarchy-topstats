@@ -61,6 +61,9 @@ Item {
   property real uptime: 0
   property var previousProcessTimes: ({})
   property real previousProcessAt: 0
+  // Rolling window of per-group CPU time behind the CPU "Top applications".
+  property int cpuWindow: 10
+  property var cpuSamples: []
   property var processNames: ({})
   property var groupRules: Model.compileGroupRules(null)
   property int appRows: 6
@@ -167,6 +170,7 @@ Item {
       root.gpuPanelVisible = false
       root.previousProcessTimes = ({})
       root.previousProcessAt = 0
+      root.cpuSamples = []
       root.processNames = ({})
       root.ramPanelVisible = false
       root.pssReady = false
@@ -216,10 +220,7 @@ Item {
       var row = rows[i]
       next[row.pid] = row.cpuSeconds
       names[row.pid] = row.name
-      var before = previous[row.pid]
-      row.cpu = (before !== undefined && elapsed > 0)
-        ? Math.max(0, (row.cpuSeconds - before) / elapsed * 100)
-        : 0
+      row.cpuDelta = Model.cpuSecondsSince(row.cpuSeconds, previous[row.pid])
       if (fullScan && row.pss >= 0) cache[row.pid] = row.pss
       row.memory = cache[row.pid] !== undefined ? cache[row.pid] : row.rss
       row.approx = cache[row.pid] === undefined
@@ -231,12 +232,11 @@ Item {
     root.processNames = names
 
     var apps = Model.aggregateApps(rows, root.groupRules)
-    // Aggregated app CPU is the sum of its processes' per-core percentages.
-    // Divide by the logical CPU count so the app column is a share of the
-    // whole machine, matching the overall CPU number above it.
-    var cpuCount = Math.max(1, root.cpuCores.length)
-    for (var a = 0; a < apps.length; a++) apps[a].cpu = apps[a].cpu / cpuCount
-    var cpuSorted = apps.slice().sort(function(a, b) {
+    // CPU is averaged over a rolling window (cpuWindow seconds) of per-group
+    // CPU time, as a share of the whole machine like the overall CPU number.
+    root.cpuSamples = Model.pushCpuSample(root.cpuSamples, apps, elapsed, root.cpuWindow)
+    var cpuApps = Model.windowedApps(root.cpuSamples, apps, root.cpuCores.length)
+    var cpuSorted = cpuApps.slice().sort(function(a, b) {
       return (b.cpu - a.cpu) || (b.memory - a.memory)
     })
     var ramSorted = apps.slice().sort(function(a, b) { return b.memory - a.memory })

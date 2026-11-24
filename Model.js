@@ -291,10 +291,10 @@ function aggregateApps(rows, rules) {
     var group = groupNameFor(row, activeRules)
     var key = String(group).toLowerCase()
     if (!byName[key]) {
-      byName[key] = { name: group, cpu: 0, memory: 0, gpu: 0, count: 0, approx: false, pids: [] }
+      byName[key] = { name: group, cpu: 0, cpuSeconds: 0, memory: 0, gpu: 0, count: 0, approx: false, pids: [] }
     }
     var entry = byName[key]
-    entry.cpu += Number(row.cpu) || 0
+    entry.cpuSeconds += Number(row.cpuDelta) || 0
     entry.memory += memory
     entry.gpu += Number(row.gpu) || 0
     entry.count += 1
@@ -303,6 +303,68 @@ function aggregateApps(rows, rules) {
   }
   var out = []
   for (var name in byName) out.push(byName[name])
+  return out
+}
+
+// CPU seconds a process used since the previous scan. A pid missing from the
+// previous scan started after it (the scan lists every process with resident
+// memory), so everything it has used happened inside the interval and counts
+// in full instead of reading as 0 until the next scan.
+function cpuSecondsSince(current, previous) {
+  if (previous === undefined) return Math.max(0, current)
+  return Math.max(0, current - previous)
+}
+
+// Appends one scan's per-group CPU seconds to the rolling window and drops
+// samples that are no longer needed to cover `windowSeconds`. `apps` are the
+// aggregateApps() groups of that scan whose cpuSeconds were summed from
+// cpuSecondsSince(). Totals are kept per group, not per pid, so a process
+// that exits mid-window keeps contributing what it used.
+function pushCpuSample(samples, apps, elapsed, windowSeconds) {
+  if (!(elapsed > 0)) return samples
+  var groups = {}
+  for (var i = 0; i < apps.length; i++) {
+    groups[String(apps[i].name).toLowerCase()] = { name: apps[i].name, seconds: apps[i].cpuSeconds || 0 }
+  }
+  var out = samples.concat([{ elapsed: elapsed, groups: groups }])
+  var span = 0
+  for (var j = out.length - 1; j >= 0; j--) {
+    span += out[j].elapsed
+    if (span >= windowSeconds) return out.slice(j)
+  }
+  return out
+}
+
+// Groups with their CPU share averaged over the window, as a percentage of
+// the whole machine. `latest` supplies memory and process counts from the
+// newest scan; groups that only exist in older samples (all their processes
+// exited) stay listed with count 0 until they age out of the window.
+function windowedApps(samples, latest, cpuCount) {
+  var span = 0
+  var seconds = {}
+  var names = {}
+  for (var i = 0; i < samples.length; i++) {
+    span += samples[i].elapsed
+    for (var key in samples[i].groups) {
+      seconds[key] = (seconds[key] || 0) + samples[i].groups[key].seconds
+      names[key] = samples[i].groups[key].name
+    }
+  }
+  var scale = span > 0 ? 100 / span / Math.max(1, cpuCount) : 0
+  var out = []
+  var seen = {}
+  for (var a = 0; a < latest.length; a++) {
+    var lkey = String(latest[a].name).toLowerCase()
+    seen[lkey] = true
+    var copy = {}
+    for (var field in latest[a]) copy[field] = latest[a][field]
+    copy.cpu = (seconds[lkey] || 0) * scale
+    out.push(copy)
+  }
+  for (var gone in seconds) {
+    if (seen[gone]) continue
+    out.push({ name: names[gone], cpu: seconds[gone] * scale, cpuSeconds: 0, memory: 0, gpu: 0, count: 0, approx: false, pids: [] })
+  }
   return out
 }
 

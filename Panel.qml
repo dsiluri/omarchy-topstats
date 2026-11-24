@@ -316,7 +316,7 @@ Panel {
 
             ProcessSection {
               width: parent.width
-              title: "Top applications"
+              title: "Top applications (" + (root.sampler ? root.sampler.cpuWindow : 10) + " s avg)"
               rows: root.sampler ? root.sampler.topAppsCpu : []
               mode: "cpu"
               emptyText: "Collecting…"

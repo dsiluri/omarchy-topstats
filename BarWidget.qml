@@ -105,6 +105,7 @@ BarWidget {
     gpuMode: String(root.setting("gpuDevice", "auto"))
     groupRules: Model.compileGroupRules(root.setting("groups", null))
     appRows: Math.max(3, Math.min(20, Math.round(Number(root.setting("appRows", 6)) || 6)))
+    cpuWindow: Math.max(2, Math.min(60, Math.round(Number(root.setting("cpuWindow", 10)) || 10)))
     networkEnabled: root.showNetwork
   }
 

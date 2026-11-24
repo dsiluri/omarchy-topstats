@@ -129,6 +129,7 @@ into `other`. Edit both keys in the widget entry of `shell.json`:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `appRows` | `6` | Rows per tab, 3 to 20 |
+| `cpuWindow` | `10` | Seconds the CPU "Top applications" are averaged over, 2 to 60. Processes are sampled every 2 s while the panel is open, so the window starts filling when you open it. |
 | `groups` | one `docker` rule | Ordered rules, first match wins. Each has a `name` (max 32 chars) and a `comm` and/or `cgroup` regular expression, tested against the process name and its cgroup path. Unmatched processes group by their own name. |
 
 > **GPU power note:** every `nvidia-smi` call briefly wakes the discrete GPU.
